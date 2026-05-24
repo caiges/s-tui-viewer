@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s-tui CSV Viewer</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --text: #1d2430;
+  --muted: #606b7c;
+  --line: #d7dde7;
+  --grid: #dbe1ea;
+  --accent: #2563eb;
+  --danger: #b42318;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+header {
+  display: grid;
+  gap: 12px;
+  padding: 20px 24px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 680;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+input[type="file"] {
+  max-width: 100%;
+}
+
+.meta {
+  color: var(--muted);
+}
+
+.error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+main {
+  padding: 4px 0 22px;
+}
+
+.empty {
+  margin: 22px 24px;
+  color: var(--muted);
+}
+
+.chart {
+  margin: 18px 24px;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.chart h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+svg {
+  width: 100%;
+  height: 340px;
+  display: block;
+}
+
+.axis,
+.grid {
+  stroke: var(--grid);
+  stroke-width: 1;
+}
+
+.grid {
+  opacity: .72;
+}
+
+.tick {
+  fill: #687386;
+  font-size: 11px;
+}
+
+.series-path {
+  fill: none;
+  stroke-width: 1.8;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-top: 8px;
+}
+
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #3c4656;
+}
+
+.swatch {
+  width: 16px;
+  height: 3px;
+  display: inline-block;
+}
+
+@media (max-width: 700px) {
+  header,
+  .chart,
+  .empty {
+    margin-left: 12px;
+    margin-right: 12px;
+  }
+
+  header {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  svg {
+    height: 300px;
+  }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>s-tui CSV Viewer</h1>
+  <div class="toolbar">
+    <input id="fileInput" type="file" accept=".csv,text/csv">
+    <span id="status" class="meta">Choose an s-tui CSV log to graph it locally.</span>
+  </div>
+</header>
+<main id="charts">
+  <p class="empty">No file loaded.</p>
+</main>
+
+<script>
+const groups = [
+  {title: "Temperatures C", prefix: "Temp:"},
+  {title: "Frequency MHz", prefix: "Frequency:"},
+  {title: "Utilization Percent", prefix: "Util:"},
+  {title: "Fan RPM", prefix: "Fan:"},
+];
+
+const colors = [
+  "#2563eb", "#dc2626", "#16a34a", "#ca8a04", "#9333ea",
+  "#0891b2", "#db2777", "#4b5563", "#ea580c", "#0f766e",
+  "#7c3aed", "#15803d", "#be123c", "#0369a1", "#a16207",
+];
+
+const fileInput = document.getElementById("fileInput");
+const statusEl = document.getElementById("status");
+const chartsEl = document.getElementById("charts");
+
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  try {
+    setStatus(`Reading ${file.name}...`);
+    const text = await file.text();
+    const parsed = parseCsv(text);
+    const payload = buildPayload(parsed, file.name);
+    render(payload);
+  } catch (error) {
+    chartsEl.innerHTML = "";
+    setStatus(error.message, true);
+  }
+});
+
+function setStatus(message, isError = false) {
+  statusEl.textContent = message;
+  statusEl.className = isError ? "error" : "meta";
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (inQuotes) {
+      if (char === '"' && next === '"') {
+        field += '"';
+        i += 1;
+      } else if (char === '"') {
+        inQuotes = false;
+      } else {
+        field += char;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = true;
+    } else if (char === ",") {
+      row.push(field);
+      field = "";
+    } else if (char === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    } else if (char !== "\r") {
+      field += char;
+    }
+  }
+
+  if (field.length || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  const headers = rows.shift();
+  if (!headers || !headers.includes("Time")) {
+    throw new Error("That CSV does not look like an s-tui log because it has no Time column.");
+  }
+
+  return {
+    headers,
+    rows: rows.filter((candidate) => candidate.some((value) => value !== "")),
+  };
+}
+
+function buildPayload({headers, rows}, fileName) {
+  if (!rows.length) {
+    throw new Error("The CSV has headers but no data rows.");
+  }
+
+  const timeIndex = headers.indexOf("Time");
+  const times = rows.map((row) => parseTime(row[timeIndex]));
+  if (times.some((time) => Number.isNaN(time.getTime()))) {
+    throw new Error("One or more Time values could not be parsed.");
+  }
+
+  const start = times[0];
+  const x = times.map((time) => (time - start) / 60000);
+  const matched = new Set(["Time"]);
+  const chartGroups = {};
+
+  for (const group of groups) {
+    const series = collectSeries(headers, rows, group.prefix, matched);
+    if (series.length) {
+      chartGroups[group.title] = series;
+    }
+  }
+
+  const otherSeries = collectOtherNumericSeries(headers, rows, matched);
+  if (otherSeries.length) {
+    chartGroups["Other Numeric Metrics"] = otherSeries;
+  }
+
+  if (!Object.keys(chartGroups).length) {
+    throw new Error("No numeric s-tui metric columns were found.");
+  }
+
+  return {
+    fileName,
+    sampleCount: rows.length,
+    startText: rows[0][timeIndex],
+    endText: rows[rows.length - 1][timeIndex],
+    x,
+    groups: chartGroups,
+  };
+}
+
+function parseTime(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})_(\d{2}):(\d{2}):(\d{2})$/.exec(value);
+  if (!match) return new Date(NaN);
+  const [, year, month, day, hour, minute, second] = match.map(Number);
+  return new Date(year, month - 1, day, hour, minute, second);
+}
+
+function collectSeries(headers, rows, prefix, matched) {
+  return headers
+    .filter((name) => name.startsWith(prefix))
+    .map((name) => {
+      matched.add(name);
+      return buildSeries(name, headers.indexOf(name), rows);
+    })
+    .filter((series) => series.values.some((value) => value !== null));
+}
+
+function collectOtherNumericSeries(headers, rows, matched) {
+  return headers
+    .filter((name) => !matched.has(name))
+    .map((name) => buildSeries(name, headers.indexOf(name), rows))
+    .filter((series) => series.values.some((value) => value !== null));
+}
+
+function buildSeries(name, index, rows) {
+  return {
+    name,
+    values: rows.map((row) => {
+      const raw = row[index];
+      if (raw === undefined || raw.trim() === "") return null;
+      const value = Number(raw);
+      return Number.isFinite(value) ? value : null;
+    }),
+  };
+}
+
+function render(payload) {
+  setStatus(`${payload.fileName}: ${payload.sampleCount} samples, ${payload.startText} to ${payload.endText}. X-axis is minutes since start.`);
+  chartsEl.innerHTML = Object.entries(payload.groups)
+    .map(([title, series]) => drawChart(title, series, payload.x))
+    .join("");
+}
+
+function niceTicks(min, max, count) {
+  if (min === max) return [min];
+  const step0 = Math.abs(max - min) / Math.max(1, count);
+  const mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const err = step0 / mag;
+  const step = (err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1) * mag;
+  const ticks = [];
+  for (let value = Math.ceil(min / step) * step; value <= max + step * 0.5; value += step) {
+    ticks.push(value);
+  }
+  return ticks;
+}
+
+function drawChart(title, series, xs) {
+  const margin = {top: 14, right: 18, bottom: 38, left: 58};
+  const width = 1100;
+  const height = 340;
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+  const values = series.flatMap((entry) => entry.values.filter((value) => value !== null));
+  const xmin = Math.min(...xs);
+  const xmax = Math.max(...xs);
+  let ymin = Math.min(...values);
+  let ymax = Math.max(...values);
+  const pad = (ymax - ymin || 1) * 0.08;
+  ymin -= pad;
+  ymax += pad;
+
+  const sx = (x) => margin.left + ((x - xmin) / (xmax - xmin || 1)) * plotW;
+  const sy = (y) => margin.top + plotH - ((y - ymin) / (ymax - ymin || 1)) * plotH;
+  const yticks = niceTicks(ymin, ymax, 6);
+  const xticks = niceTicks(xmin, xmax, 6);
+
+  let svg = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(title)}">`;
+  for (const y of yticks) {
+    svg += `<line class="grid" x1="${margin.left}" y1="${sy(y)}" x2="${width - margin.right}" y2="${sy(y)}"></line>`;
+    svg += `<text class="tick" x="${margin.left - 8}" y="${sy(y) + 4}" text-anchor="end">${Number(y.toFixed(1))}</text>`;
+  }
+  for (const x of xticks) {
+    svg += `<line class="grid" x1="${sx(x)}" y1="${margin.top}" x2="${sx(x)}" y2="${height - margin.bottom}"></line>`;
+    svg += `<text class="tick" x="${sx(x)}" y="${height - 13}" text-anchor="middle">${Number(x.toFixed(1))}</text>`;
+  }
+  svg += `<line class="axis" x1="${margin.left}" y1="${height - margin.bottom}" x2="${width - margin.right}" y2="${height - margin.bottom}"></line>`;
+  svg += `<line class="axis" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${height - margin.bottom}"></line>`;
+
+  series.forEach((entry, index) => {
+    let path = "";
+    entry.values.forEach((value, valueIndex) => {
+      if (value === null) return;
+      path += `${path ? "L" : "M"}${sx(xs[valueIndex]).toFixed(2)} ${sy(value).toFixed(2)} `;
+    });
+    svg += `<path class="series-path" d="${path}" stroke="${colors[index % colors.length]}"></path>`;
+  });
+  svg += "</svg>";
+
+  const legend = series
+    .map((entry, index) => `<span><i class="swatch" style="background:${colors[index % colors.length]}"></i>${escapeHtml(entry.name)}</span>`)
+    .join("");
+
+  return `<section class="chart"><h2>${escapeHtml(title)}</h2>${svg}<div class="legend">${legend}</div></section>`;
+}
+
+function escapeHtml(value) {
+  return value.replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+</script>
+</body>
+</html>
