@@ -2,6 +2,8 @@
 
 A small static viewer for `s-tui` CSV logs.
 
+![s-tui CSV Viewer screenshot](docs/images/main.png)
+
 ## Use
 
 Open `index.html` in a browser, choose an `s-tui` CSV file, and the page will render charts for:
